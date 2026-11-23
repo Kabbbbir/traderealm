@@ -1,0 +1,32 @@
+Pushing TradeRealm to GitHub - pick ONE of the two ways
+
+FIRST (both ways): unpack this pack with the same PowerShell block as before.
+It puts .gitignore and README.md into your traderealm folder, so accounts and
+save data stay out of the repo.
+
+WAY A - GitHub Desktop (no commands, easiest)
+1. Install GitHub Desktop from desktop.github.com and sign in with your GitHub account.
+2. File > Add local repository > Choose... > select C:\Users\kabir\traderealm.
+   If it says it is not a git repository yet, click the blue "create a repository"
+   link it offers, keep the name traderealm, Create.
+3. You should see about 30 files listed as changes. Bottom left, write:
+       TradeRealm step 3: auctions, trades, bots, world events
+   and click "Commit to main".
+4. Click "Publish repository" (top). TICK "Keep this code private". Publish.
+Done - it is at github.com/KabirDP/traderealm.
+
+WAY B - command line (needs Git for Windows from git-scm.com)
+1. Create the empty repo in the browser first: https://github.com/new
+   Name: traderealm, Private, and do NOT tick "Add a README" (keep it empty).
+2. Then in cmd:
+       cd %USERPROFILE%\traderealm
+       git init
+       git add .
+       git commit -m "TradeRealm step 3: auctions, trades, bots, world events"
+       git branch -M main
+       git remote add origin https://github.com/KabirDP/traderealm.git
+       git push -u origin main
+   Git opens a browser window to sign in the first time.
+
+After either way: future changes are just commit + push (or one Commit button
+in GitHub Desktop).
