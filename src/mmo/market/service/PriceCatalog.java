@@ -60,6 +60,17 @@ public class PriceCatalog {
         save();
     }
 
+    /** Admin tool: set one item's catalog price directly. Returns false on bad input. */
+    public boolean setPrice(String itemName, int price) {
+        Item item = findByName(itemName);
+        if (item == null || price < 1) {
+            return false;
+        }
+        item.setLastSoldPrice(price);
+        save();
+        return true;
+    }
+
     /** Called after every sale: the past price moves and the bots adapt. */
     public void recordSale(String itemName, int price) {
         Item item = findByName(itemName);

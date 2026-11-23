@@ -6,9 +6,11 @@ import mmo.market.exceptions.InsufficientFundsException;
 import mmo.market.exceptions.OrderException;
 import mmo.market.exceptions.TradeException;
 import mmo.market.model.Account;
+import mmo.market.model.Admin;
 import mmo.market.model.Auction;
 import mmo.market.model.BotPlayer;
 import mmo.market.model.Item;
+import mmo.market.model.MarketEvent;
 import mmo.market.model.Order;
 import mmo.market.model.Player;
 import mmo.market.model.Rarity;
@@ -61,12 +63,21 @@ public class MarketWindow extends JFrame {
     private final DefaultTableModel auctionModel = readOnlyModel("ID", "Item", "Rarity", "Seller", "Base", "Top bid", "Bidder", "Time left");
     private final DefaultTableModel tradeModel = readOnlyModel("ID", "From", "To", "Gives", "Wants", "Status");
     private final DefaultTableModel buyModel = readOnlyModel("Item", "Price (g)", "Buyer");
+    private final DefaultTableModel adminModel = readOnlyModel("Name", "Role", "Gold", "Inventory");
     private final DefaultTableModel sellModel = readOnlyModel("Item", "Price (g)", "Seller");
     private final JTable inventoryTable = new JTable(inventoryModel);
     private final JTable auctionTable = new JTable(auctionModel);
     private final JTable tradeTable = new JTable(tradeModel);
     private final JTable buyTable = new JTable(buyModel);
     private final JTable sellTable = new JTable(sellModel);
+    private final JTable adminTable = new JTable(adminModel);
+    // admin-only controls, built in buildAdminTab() when an ADMIN logs in
+    private JComboBox<String> adminItemBox;
+    private JComboBox<String> adminEventBox;
+    private JTextField adminPriceField;
+    private JComboBox<String> adminSpawnItemBox;
+    private JComboBox<String> adminSpawnAccountBox;
+    private JLabel adminFeesLabel;
     private final JTextArea logArea = new JTextArea(6, 60);
     private final List<TradeOffer> myTrades = new ArrayList<>();
     private final List<Order> shownBuys = new ArrayList<>();
@@ -160,6 +171,9 @@ public class MarketWindow extends JFrame {
         tabs.addTab("Auction House", buildAuctionTab());
         tabs.addTab("Trades", buildTradesTab());
         tabs.addTab("Orders", buildOrdersTab());
+        if (account instanceof Admin) {
+            tabs.addTab("Admin", buildAdminTab());   // only admins get the dashboard
+        }
 
         logArea.setEditable(false);
         logArea.setLineWrap(true);
@@ -348,6 +362,10 @@ public class MarketWindow extends JFrame {
         JButton sell = Theme.goldButton("Place sell order");
         sell.setName("sellOrderButton");
         sell.addActionListener(e -> onSellOrder());
+        JButton fill = Theme.goldButton("Fill selected order");
+        fill.setName("fillOrderButton");
+        fill.setToolTipText("Sell into a selected buy order, or buy from a selected sell order, at its price");
+        fill.addActionListener(e -> onFillOrder());
         JButton cancel = Theme.goldButton("Cancel my selected order");
         cancel.setName("cancelOrderButton");
         cancel.addActionListener(e -> onCancelOrder());
@@ -360,6 +378,7 @@ public class MarketWindow extends JFrame {
         buttonRow.setBackground(Theme.BG);
         buttonRow.add(buy);
         buttonRow.add(sell);
+        buttonRow.add(fill);
         buttonRow.add(cancel);
         panel.add(buttonRow, BorderLayout.SOUTH);
         return panel;
@@ -429,6 +448,54 @@ public class MarketWindow extends JFrame {
         }
     }
 
+    /**
+     * Fills the selected order in one click: a selected buy order means "sell
+     * that item into the bid", a selected sell order means "buy at that ask".
+     * Goes through the same matching code as placing an order at that price,
+     * so escrow settles exactly the same way.
+     */
+    private void onFillOrder() {
+        int buyRow = buyTable.getSelectedRow();
+        int sellRow = sellTable.getSelectedRow();
+        if (buyRow < 0 && sellRow < 0) {
+            info("Select an order to fill first.");
+            return;
+        }
+        Order order = buyRow >= 0 ? shownBuys.get(buyRow) : shownSells.get(sellRow);
+        if (order.getOwner().equalsIgnoreCase(account.getUsername())) {
+            info("That is your own order - cancel it instead.");
+            return;
+        }
+        if (market.findOrder(order.getId()) == null) {
+            info("That order was just filled by someone else.");
+            refresh();
+            return;
+        }
+        try {
+            if (order.getSide() == Order.Side.BUY) {
+                // sell into the bid: hand over the item, receive the bid's gold
+                Item mine = null;
+                for (Item item : account.getInventory().getItems()) {
+                    if (item.getName().equalsIgnoreCase(order.getItemName())) {
+                        mine = item;
+                        break;
+                    }
+                }
+                if (mine == null) {
+                    info("You do not have " + order.getItemName() + " to sell.");
+                    return;
+                }
+                market.placeSellOrder(account, mine, order.getPrice());
+            } else {
+                // buy from the ask: pay its price, receive the item
+                market.placeBuyOrder(account, order.getItemName(), order.getPrice());
+            }
+            refresh();
+        } catch (OrderException | InsufficientFundsException ex) {
+            info(ex.getMessage());
+        }
+    }
+
     private void onCancelOrder() {
         int buyRow = buyTable.getSelectedRow();
         int sellRow = sellTable.getSelectedRow();
@@ -445,6 +512,176 @@ public class MarketWindow extends JFrame {
         }
     }
 
+    // ---------- admin tab (ADMIN role only) ----------
+
+    private JPanel buildAdminTab() {
+        Theme.styleTable(adminTable);
+        adminTable.setName("adminTable");
+
+        // every account with its purse and belongings, refreshed on every tick
+        JPanel tablePanel = titled("All accounts", adminTable);
+
+        List<Item> items = catalog.getItems();
+        String[] itemNames = new String[items.size()];
+        for (int i = 0; i < items.size(); i++) {
+            itemNames[i] = items.get(i).getName() + " (" + items.get(i).getRarity() + ")";
+        }
+        adminItemBox = new JComboBox<>(itemNames);
+        adminItemBox.setName("adminItemBox");
+        adminPriceField = new JTextField(7);
+        adminPriceField.setName("adminPriceField");
+        JButton setPrice = Theme.goldButton("Set price");
+        setPrice.setName("adminSetPriceButton");
+        setPrice.addActionListener(e -> onAdminSetPrice());
+        JPanel priceRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        priceRow.setOpaque(false);
+        priceRow.add(Theme.label("Catalog price:"));
+        priceRow.add(adminItemBox);
+        priceRow.add(adminPriceField);
+        priceRow.add(setPrice);
+
+        MarketEvent[] values = MarketEvent.values();
+        String[] eventNames = new String[values.length];
+        for (int i = 0; i < values.length; i++) {
+            eventNames[i] = values[i].getTitle();
+        }
+        adminEventBox = new JComboBox<>(eventNames);
+        adminEventBox.setName("adminEventBox");
+        JButton trigger = Theme.goldButton("Trigger event");
+        trigger.setName("adminTriggerButton");
+        trigger.addActionListener(e -> onAdminTrigger());
+        JPanel eventRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        eventRow.setOpaque(false);
+        eventRow.add(Theme.label("World event:"));
+        eventRow.add(adminEventBox);
+        eventRow.add(trigger);
+
+        adminSpawnItemBox = new JComboBox<>(itemNames);
+        adminSpawnItemBox.setName("adminSpawnItemBox");
+        adminSpawnAccountBox = new JComboBox<>();
+        adminSpawnAccountBox.setName("adminSpawnAccountBox");
+        JButton spawn = Theme.goldButton("Spawn item");
+        spawn.setName("adminSpawnButton");
+        spawn.setToolTipText("Mints the item straight into that account's inventory");
+        spawn.addActionListener(e -> onAdminSpawn());
+        JPanel spawnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        spawnRow.setOpaque(false);
+        spawnRow.add(Theme.label("Spawn item:"));
+        spawnRow.add(adminSpawnItemBox);
+        spawnRow.add(Theme.label("for"));
+        spawnRow.add(adminSpawnAccountBox);
+        spawnRow.add(spawn);
+
+        adminFeesLabel = Theme.label(" ");
+        adminFeesLabel.setName("adminFeesLabel");
+        JPanel feesRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        feesRow.setOpaque(false);
+        feesRow.add(adminFeesLabel);
+
+        JPanel controls = new JPanel();
+        controls.setLayout(new BoxLayout(controls, BoxLayout.Y_AXIS));
+        controls.setBackground(Theme.BG);
+        controls.setBorder(new EmptyBorder(8, 8, 8, 8));
+        controls.add(priceRow);
+        controls.add(Box.createVerticalStrut(8));
+        controls.add(eventRow);
+        controls.add(Box.createVerticalStrut(8));
+        controls.add(spawnRow);
+        controls.add(Box.createVerticalStrut(8));
+        controls.add(feesRow);
+
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBackground(Theme.BG);
+        panel.setBorder(new EmptyBorder(8, 8, 8, 8));
+        panel.add(tablePanel, BorderLayout.CENTER);
+        panel.add(controls, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    /** Admin: overwrite one item's catalog price. Bots and events read it from there. */
+    private void onAdminSetPrice() {
+        int index = adminItemBox.getSelectedIndex();
+        if (index < 0) return;
+        String itemName = catalog.getItems().get(index).getName();
+        int price;
+        try {
+            price = Integer.parseInt(adminPriceField.getText().trim());
+        } catch (NumberFormatException ex) {
+            info("Enter a whole number of gold.");
+            return;
+        }
+        if (!catalog.setPrice(itemName, price)) {
+            info("Price must be at least 1 gold.");
+            return;
+        }
+        market.announce("The admin set the price of " + itemName + " to " + price + "g");
+        refresh();
+    }
+
+    /** Admin: mint an item straight into any account's inventory (new supply). */
+    private void onAdminSpawn() {
+        int index = adminSpawnItemBox.getSelectedIndex();
+        String who = (String) adminSpawnAccountBox.getSelectedItem();
+        if (index < 0 || who == null) return;
+        Account target = accounts.find(who);
+        if (target == null) return;
+        Item proto = catalog.getItems().get(index);
+        target.getInventory().add(new Item(proto.getName(), proto.getRarity(), proto.getLastSoldPrice()));
+        accounts.saveAll();
+        market.announce("The admin spawned " + proto.getName() + " for " + target.getUsername());
+        refresh();
+    }
+
+    /** Admin: fire the chosen world event right now, for demos and testing. */
+    private void onAdminTrigger() {
+        MarketEvent event = MarketEvent.values()[adminEventBox.getSelectedIndex()];
+        events.trigger(event);
+        refresh();
+    }
+
+    /** Rebuilds the admin accounts table, keeping the selected row by username. */
+    private void refreshAdminTab() {
+        String selected = null;
+        int row = adminTable.getSelectedRow();
+        if (row >= 0 && row < adminModel.getRowCount()) {
+            selected = String.valueOf(adminModel.getValueAt(row, 0));
+        }
+        List<Account> all = accounts.getAll();
+        all.sort((a, b) -> a.getUsername().compareToIgnoreCase(b.getUsername()));
+        adminModel.setRowCount(0);
+        for (Account acc : all) {
+            StringBuilder belongings = new StringBuilder();
+            for (Item item : acc.getInventory().getItems()) {
+                if (belongings.length() > 0) belongings.append(", ");
+                belongings.append(item.getName());
+            }
+            adminModel.addRow(new Object[]{acc.getUsername(), acc.getRole(), acc.getGold(),
+                    belongings.length() == 0 ? "-" : belongings.toString()});
+        }
+        if (selected != null) {
+            for (int i = 0; i < adminModel.getRowCount(); i++) {
+                if (selected.equals(adminModel.getValueAt(i, 0))) {
+                    adminTable.setRowSelectionInterval(i, i);
+                    break;
+                }
+            }
+        }
+
+        // keep the spawn-target dropdown in step with the account list
+        Object currentTarget = adminSpawnAccountBox.getSelectedItem();
+        if (adminSpawnAccountBox.getItemCount() != all.size()) {
+            adminSpawnAccountBox.removeAllItems();
+            for (Account acc : all) {
+                adminSpawnAccountBox.addItem(acc.getUsername());
+            }
+            if (currentTarget != null) {
+                adminSpawnAccountBox.setSelectedItem(currentTarget);
+            }
+        }
+        adminFeesLabel.setText("Market fees burned so far: " + market.getFeesBurned()
+                + " g (gold sink, " + (int) (Market.MARKET_FEE_RATE * 100) + "% of every sale)");
+    }
+
     // ---------- refresh + helpers ----------
 
     /**
@@ -454,6 +691,9 @@ public class MarketWindow extends JFrame {
      * instead of being reset every 2 seconds.
      */
     public void refresh() {
+        if (account instanceof Admin && adminItemBox != null) {
+            refreshAdminTab();
+        }
         String goldText = "Gold: " + account.getGold();
         if (!goldText.equals(goldLabel.getText())) {
             goldLabel.setText(goldText);

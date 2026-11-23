@@ -47,7 +47,11 @@ public class EventEngine {
 
     /** Picks a random event, moves the affected past prices and announces it. */
     private void fire() {
-        MarketEvent event = ALL[random.nextInt(ALL.length)];
+        trigger(ALL[random.nextInt(ALL.length)]);
+    }
+
+    /** Admin tool: fire a chosen event right away. The random timer keeps running. */
+    public void trigger(MarketEvent event) {
         List<Item> hit = event.affectedItems(catalog.getItems(), random);
         catalog.adjustPrices(hit, event.getMultiplier());
         active = event;

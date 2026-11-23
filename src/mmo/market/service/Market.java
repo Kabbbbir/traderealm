@@ -44,6 +44,9 @@ public class Market {
 
     private final AccountManager accounts;
     private final PriceCatalog catalog;
+    /** Every sale through the market pays this fraction in fees, which is burned. */
+    public static final double MARKET_FEE_RATE = 0.02;
+
     private final Path saveFile;
     private final List<Auction> auctions = new ArrayList<>();
     private final List<TradeOffer> trades = new ArrayList<>();
@@ -52,6 +55,7 @@ public class Market {
     private long nextAuctionId = 1;
     private long nextTradeId = 1;
     private long nextOrderId = 1;
+    private int feesBurned;   // total gold the market fee has removed from the economy
 
     public Market(AccountManager accounts, PriceCatalog catalog, Path saveFile) {
         this.accounts = accounts;
@@ -124,11 +128,12 @@ public class Market {
             if (auction.getCurrentBidder() != null) {
                 Account winner = accounts.find(auction.getCurrentBidder());
                 if (winner != null && seller != null) {
-                    winner.getInventory().add(auction.getItem());   // item to the winner
-                    seller.deposit(auction.getCurrentBid());        // escrowed gold to the seller
+                    int fee = fee(auction.getCurrentBid());
+                    winner.getInventory().add(auction.getItem());        // item to the winner
+                    seller.deposit(auction.getCurrentBid() - fee);       // escrowed gold minus the fee
                     catalog.recordSale(auction.getItem().getName(), auction.getCurrentBid());
                     log(auction.getItem().getName() + " sold to " + winner.getUsername()
-                            + " for " + auction.getCurrentBid() + "g");
+                            + " for " + auction.getCurrentBid() + "g (" + fee + "g market fee)");
                 }
             } else if (seller != null) {
                 seller.getInventory().add(auction.getItem());       // no bids: item goes back
@@ -269,15 +274,17 @@ public class Market {
             Account seller = accounts.find(match.getOwner());
             orders.remove(match);
             buyer.getInventory().add(catalogItem(match.getItemName()));
+            int fee = fee(match.getPrice());
             if (seller != null) {
-                seller.deposit(match.getPrice());
+                seller.deposit(match.getPrice() - fee);
             }
             if (price > match.getPrice()) {
                 buyer.deposit(price - match.getPrice());   // refund what was not needed
             }
             catalog.recordSale(match.getItemName(), match.getPrice());
             log("Order filled: " + buyer.getUsername() + " bought " + match.getItemName()
-                    + " from " + match.getOwner() + " for " + match.getPrice() + "g");
+                    + " from " + match.getOwner() + " for " + match.getPrice() + "g"
+                    + " (" + fee + "g market fee)");
         }
         accounts.saveAll();
         save();
@@ -312,13 +319,15 @@ public class Market {
         } else {
             Account buyer = accounts.find(match.getOwner());
             orders.remove(match);
-            seller.deposit(match.getPrice());   // the resting buy sets the price
+            int fee = fee(match.getPrice());   // the resting buy sets the price
+            seller.deposit(match.getPrice() - fee);
             if (buyer != null) {
                 buyer.getInventory().add(item);
             }
             catalog.recordSale(item.getName(), match.getPrice());
             log("Order filled: " + seller.getUsername() + " sold " + item.getName()
-                    + " to " + match.getOwner() + " for " + match.getPrice() + "g");
+                    + " to " + match.getOwner() + " for " + match.getPrice() + "g"
+                    + " (" + fee + "g market fee)");
         }
         accounts.saveAll();
         save();
@@ -347,6 +356,22 @@ public class Market {
     private Item catalogItem(String itemName) {
         Item listed = catalog.findByName(itemName);
         return new Item(listed.getName(), listed.getRarity(), listed.getLastSoldPrice());
+    }
+
+    /** Total gold the 2% market fee has burned so far (the sink), shown on the Admin tab. */
+    public synchronized int getFeesBurned() {
+        return feesBurned;
+    }
+
+    /**
+     * The 2% market fee: every sale pays it, and the fee gold vanishes from the
+     * economy (a gold sink, so minted items and gold do not inflate forever).
+     * At least 1 gold so even tiny sales pay something.
+     */
+    private int fee(int gross) {
+        int f = Math.max(1, (int) Math.round(gross * MARKET_FEE_RATE));
+        feesBurned += f;
+        return f;
     }
 
     // ---------- lookups, log, persistence ----------
@@ -449,6 +474,8 @@ public class Market {
                     writer.write(order.toRecord());
                     writer.newLine();
                 }
+                writer.write("FEES|" + feesBurned);
+                writer.newLine();
             }
         } catch (IOException e) {
             throw new UncheckedIOException("Could not save market to " + saveFile, e);
@@ -482,6 +509,8 @@ public class Market {
                             p[3], Integer.parseInt(p[4]), p[5]);
                     orders.add(order);
                     nextOrderId = Math.max(nextOrderId, order.getId() + 1);
+                } else if (p[0].equals("FEES") && p.length == 2) {
+                    feesBurned = Integer.parseInt(p[1]);
                 }
             }
         } catch (NoSuchFileException e) {
