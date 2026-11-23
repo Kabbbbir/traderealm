@@ -13,8 +13,7 @@ because they build the list of source files differently.
 
 Windows - cmd.exe, from the project folder:
 
-    (for /r src %f in (*.java) do @echo "%f") > sources.txt
-    mkdir out
+    dir /s /b src\*.java > sources.txt    mkdir out
     javac -d out "@sources.txt"
     java -cp out mmo.market.Main
 
@@ -37,11 +36,6 @@ Mac / Linux:
 Use javac and java from the same JDK. If you move the project to another laptop,
 compile it there again rather than copying the old out/ folder.
 The cmd block is for pasting into cmd.exe, not a .bat file.
-
-Two JDK 8 traps the commands above avoid:
-- do NOT use "javac --release 8" - that flag only exists in JDK 9 and newer
-- JDK 8's javac does not create the output folder - the mkdir line does it
-  (if "out" already exists, ignore mkdir's complaint and carry on)
 
 On first run the app creates a data/ folder (accounts, price catalog, live market)
 next to where you run it. Those files are local only and not committed.
